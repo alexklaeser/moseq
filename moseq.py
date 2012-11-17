@@ -1,0 +1,193 @@
+#!/usr/bin/env python
+
+import sys
+import math
+import midi
+import midi.sequencer
+import jack
+import monome
+from threading import Timer
+import time
+import argparse
+
+class Track(object):
+	def __init__(self, maxPosition = 16):
+		self._ranges = []
+		self._maxPosition = maxPosition
+	
+	def add(self, pos):
+		'''Add a new position that has been pressed and integrate it into
+		the existing ranges.'''
+		inRange = False
+		for irange in self._ranges:
+			inRange = True
+
+			if pos == irange[0]:
+				# position fits beginning of range -> delete range
+				self._ranges.remove(irange)
+			elif pos > irange[0] and (pos < irange[1] or -1 == irange[1]):
+				# resize range
+				if irange[1] == -1:
+					# end is unlimited -> position specifies new end
+					irange[1] = pos
+				elif pos - irange[0] < irange[1] - pos:
+					# position is closer to range start -> modify start
+					irange[0] = pos
+				else:
+					# position is closer to range end -> modify end
+					irange[1] = pos
+			else:
+				# position could not be matched
+				inRange = False
+
+		if not inRange:
+			# position could not be matched -> add a new range
+			newRange = [pos, -1]
+
+			for irange in reversed(self._ranges):
+				if pos < irange[0]:
+					# new range is limited by existing range -> merge into existing range
+					irange[0] = pos
+					newRange = None
+					break
+
+			if newRange:
+				self._ranges.append(newRange)
+
+		# clean up... i.e., merge subsequent ranges
+		i = 1
+		while i < len(self._ranges):
+			if self._ranges[i - 1][1] == self._ranges[i][0]:
+				self._ranges[i - 1][1] = self._ranges[i][1]
+				del self._ranges[i]
+			else:
+				i += 1
+
+	def advance(self):
+		'''Advance all ranges by one position.'''
+		i = 0
+		while i < len(self._ranges):
+			irange = self._ranges[i]
+			irange[0] = max(0, irange[0] - 1)
+			irange[1] = max(-1, irange[1] - 1)
+			if irange[1] != -1 and irange[1] <= 0:
+				del self._ranges[i]
+			else:
+				i += 1
+
+	@property
+	def mask(self):
+		'''Returns bit mask for the track.'''
+		mask = 0
+		for irange in self._ranges:
+			start = irange[0]
+			end = irange[1]
+			if end < 0:
+				end = self._maxPosition
+			for i in range(start, end):
+				mask |= 1 << i
+		return mask
+
+	def clear(self):
+		'''Clears all track ranges.'''
+		self._ranges = []
+			
+seq = None
+mon = None
+buttons = [[]]
+tracks = []
+tempo = 0
+measureLength = 0
+_jackRunning = False
+
+def beat(tick):
+	if not (tick % (2 * measureLength)):
+		# advance tracks
+		for itrack in tracks:
+			itrack.advance()
+
+	if not (tick % 2):
+		# show LEDs
+		for i in range(len(tracks)):
+			mask = tracks[i].mask
+			mon.led_row(0, i, mask)
+	else:
+		# uneven tick, switch off all LEDs
+		mon.led_all(0)
+
+def readEvents(tick):
+	'''Process all monome events.'''
+	while True:
+		e = mon.next_event()
+		if not e: break  # stop if all events have been processed
+		if not e.pressed: continue  # ignore button-up events
+
+		# add pressed position to the corresponding track
+		track = tracks[e.y]
+		track.add(e.x)
+
+def loop():
+	'''Main loop function, calls processing sub-functions.'''
+	global _jackRunning
+
+	# compute the current tick
+	interval = 60.0 / tempo / 2  # call the loop twice per beat (for blinking)
+	transportTime = float(jack.get_current_transport_frame()) / jack.get_sample_rate()
+	tickCount = math.floor(transportTime / interval)
+
+	if tickCount > 0 and not _jackRunning:
+		print 'jack is up and running... starting monome sequencer'
+		_jackRunning = True
+
+	if jack.get_transport_state() != jack.TransportRolling:
+		# jack is stopped... stop processing here, as well
+		if tickCount == 0 and _jackRunning:
+			print 'jack transport has been stopped... waiting for jack to be restarted'
+			_jackRunning = False
+			mon.led_all(0)
+			for itrack in tracks:
+				itrack.clear()
+		Timer(0.1, loop).start()
+		return
+
+	# processing
+	readEvents(tickCount)
+	beat(tickCount)
+
+	# see when the loop needs to be called the next time
+	transportTime = float(jack.get_current_transport_frame()) / jack.get_sample_rate()
+	waitTime = (tickCount + 1) * interval - transportTime
+	Timer(waitTime, loop).start()
+
+def init(device, _tempo, _measureLength):
+	'''Initiate all variables an devices/classes.'''
+	global seq, mon, buttons, tracks, tempo, measureLength
+	tempo = _tempo
+	measureLength = _measureLength
+	#seq = midi.sequencer.SequencerDuplex(alsa_sequencer_name='moseq', alsa_port_name: 'moseq port 0', alsa_queue_name: 'moseq queue')
+
+	# init monome
+	mon = monome.Monome(device)
+	mon.led_all(0)
+	buttons = [[0 for x in range(mon.columns)] for y in range(mon.rows)]
+
+	# init connection to jack
+	jack.attach('moseq')
+
+	# init tracks
+	tracks = [Track(mon.columns) for i in range(mon.rows)]
+
+	# start main loop
+	loop()
+
+def parse():
+	'''Parse the command line arguments.'''
+	parser = argparse.ArgumentParser(description='A live midi sequencer using the monome.')
+	parser.add_argument('device', metavar='dev', help='Path to the USB devices corresponding to your monome (e.g. /dev/ttyUSB0)')
+	parser.add_argument('--tempo', '-t', metavar='bpm', default=120, type=int, help='Tempo for the session (in bpm). (default=120)')
+	parser.add_argument('--measure-length', '-l', metavar='len', default=4, type=int, help='Length of each measure (in quarter notes). (default=4)')
+	args = parser.parse_args()
+	init(args.device, args.tempo, args.measure_length)
+
+if __name__ == "__main__":
+	parse()
