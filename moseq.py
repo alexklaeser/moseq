@@ -12,19 +12,19 @@ import argparse
 
 class Track(object):
 	def __init__(self, maxPosition = 16):
-		self._ranges = []
+		self.ranges = []
 		self._maxPosition = maxPosition
 	
 	def add(self, pos):
 		'''Add a new position that has been pressed and integrate it into
 		the existing ranges.'''
 		inRange = False
-		for irange in self._ranges:
+		for irange in self.ranges:
 			inRange = True
 
 			if pos == irange[0]:
 				# position fits beginning of range -> delete range
-				self._ranges.remove(irange)
+				self.ranges.remove(irange)
 			elif pos > irange[0] and (pos < irange[1] or -1 == irange[1]):
 				# resize range
 				if irange[1] == -1:
@@ -44,7 +44,7 @@ class Track(object):
 			# position could not be matched -> add a new range
 			newRange = [pos, -1]
 
-			for irange in reversed(self._ranges):
+			for irange in reversed(self.ranges):
 				if pos < irange[0]:
 					# new range is limited by existing range -> merge into existing range
 					irange[0] = pos
@@ -52,26 +52,32 @@ class Track(object):
 					break
 
 			if newRange:
-				self._ranges.append(newRange)
+				self.ranges.append(newRange)
 
 		# clean up... i.e., merge subsequent ranges
 		i = 1
-		while i < len(self._ranges):
-			if self._ranges[i - 1][1] == self._ranges[i][0]:
-				self._ranges[i - 1][1] = self._ranges[i][1]
-				del self._ranges[i]
+		while i < len(self.ranges):
+			if self.ranges[i - 1][1] == self.ranges[i][0]:
+				self.ranges[i - 1][1] = self.ranges[i][1]
+				del self.ranges[i]
 			else:
 				i += 1
 
 	def advance(self):
 		'''Advance all ranges by one position.'''
 		i = 0
-		while i < len(self._ranges):
-			irange = self._ranges[i]
-			irange[0] = max(0, irange[0] - 1)
+		while i < len(self.ranges):
+			irange = self.ranges[i]
+			if irange[0] <= 0 and irange[1] == -1:
+				# special handling for endless range
+				irange[0] = -1
+				i += 1
+				continue
+
+			irange[0] = max(-1, irange[0] - 1)
 			irange[1] = max(-1, irange[1] - 1)
-			if irange[1] != -1 and irange[1] <= 0:
-				del self._ranges[i]
+			if irange[0] < 0 and irange[1] < 0:
+				del self.ranges[i]
 			else:
 				i += 1
 
@@ -79,8 +85,8 @@ class Track(object):
 	def mask(self):
 		'''Returns bit mask for the track.'''
 		mask = 0
-		for irange in self._ranges:
-			start = irange[0]
+		for irange in self.ranges:
+			start = max(0, irange[0])
 			end = irange[1]
 			if end < 0:
 				end = self._maxPosition
@@ -90,8 +96,8 @@ class Track(object):
 
 	def clear(self):
 		'''Clears all track ranges.'''
-		self._ranges = []
-			
+		self.ranges = []
+
 seq = None
 mon = None
 buttons = [[]]
@@ -100,8 +106,61 @@ tempo = 0
 measureLength = 0
 _jackRunning = False
 
+mapping = {
+0: {
+	'start': {'event': 'note', 'param': 100},
+	'stop': {'event': 'note', 'param': 100},
+	'channel': 0
+},
+1: {
+	'start': {'event': 'note', 'param': 101},
+	'stop': {'event': 'note', 'param': 101},
+	'channel': 0
+},
+2: {
+	'start': {'event': 'note', 'param': 102},
+	'stop': {'event': 'note', 'param': 102},
+	'channel': 0
+},
+3: {
+	'start': {'event': 'note', 'param': 103},
+	'stop': {'event': 'note', 'param': 103},
+	'channel': 0
+},
+4: {
+	'start': {'event': 'note', 'param': 101},
+	'stop': {'event': 'note', 'param': 101},
+	'channel': 0
+}}
+
 def beat(tick):
-	if not (tick % (2 * measureLength)):
+	if not ((tick + 1) % (2 * measureLength)):
+		# tick before measure start...
+		for i in range(len(tracks)):
+			# get current track
+			itrack = tracks[i]
+			if i in mapping:
+				imap = mapping[i]
+			elif str(i) in mapping:
+				imap = mapping[str(i)]
+			else:
+				# track is not mapped
+				continue
+
+			# send MIDI events
+			if itrack.ranges:
+				try:
+					if itrack.ranges[0][0] == 0:
+						# ready to fire start event
+						if imap['start']['event'] == 'note':
+							seq.event_write(midi.NoteOnEvent(pitch=imap['start']['param'], channel=imap['channel'], velocity=64), direct=True)
+					if itrack.ranges[0][1] == 0:
+						# ready to fire stop event
+						if imap['stop']['event'] == 'note':
+							seq.event_write(midi.NoteOnEvent(pitch=imap['stop']['param'], channel=imap['channel'], velocity=64), direct=True)
+				except KeyError:
+					print 'ERROR: Please check mapping for track #%s: %s' % (i, imap)
+
 		# advance tracks
 		for itrack in tracks:
 			itrack.advance()
@@ -159,12 +218,37 @@ def loop():
 	waitTime = (tickCount + 1) * interval - transportTime
 	Timer(waitTime, loop).start()
 
-def init(device, _tempo, _measureLength):
+def init(device, alsaClients, _tempo, _measureLength):
 	'''Initiate all variables an devices/classes.'''
 	global seq, mon, buttons, tracks, tempo, measureLength
 	tempo = _tempo
 	measureLength = _measureLength
-	#seq = midi.sequencer.SequencerDuplex(alsa_sequencer_name='moseq', alsa_port_name: 'moseq port 0', alsa_queue_name: 'moseq queue')
+
+	# initiate MIDI sequencer
+	seq = midi.sequencer.SequencerWrite(alsa_sequencer_name='moseq', alsa_port_name='moseq in', alsa_queue_name='moseq queue')
+	hardware = midi.sequencer.SequencerHardware()
+	for iclient in alsaClients:
+		# split string at ':'
+		tmp = iclient.split(':')
+		if len(tmp) <= 1:
+			port = '0'
+		else:
+			port = tmp[1]
+		client = tmp[0]
+
+		try:
+			# try to parse integers
+			port = int(port)
+			try:
+				client = int(client)
+			except ValueError:
+				# fallback: handle named client name
+				client = hardware.get_client(client).client
+		except ValueError:
+			# fallback: handle named client and port
+			client, port = hardware.get_client_and_port(client, port)
+		seq.subscribe_port(client, port)
+	seq.start_sequencer()
 
 	# init monome
 	mon = monome.Monome(device)
@@ -182,12 +266,20 @@ def init(device, _tempo, _measureLength):
 
 def parse():
 	'''Parse the command line arguments.'''
+	if '-L' in sys.argv or '--list' in sys.argv:
+		print midi.sequencer.SequencerHardware()
+		sys.exit(0)
+
 	parser = argparse.ArgumentParser(description='A live midi sequencer using the monome.')
-	parser.add_argument('device', metavar='dev', help='Path to the USB devices corresponding to your monome (e.g. /dev/ttyUSB0)')
+	parser.add_argument('--device', '-d', metavar='dev', required=True, help='Path to the USB devices corresponding to your monome (e.g. /dev/ttyUSB0)')
 	parser.add_argument('--tempo', '-t', metavar='bpm', default=120, type=int, help='Tempo for the session (in bpm). (default=120)')
-	parser.add_argument('--measure-length', '-l', metavar='len', default=4, type=int, help='Length of each measure (in quarter notes). (default=4)')
+	parser.add_argument('--measure-length', '-l', metavar='length', default=4, type=int, help='Length of each measure (in quarter notes). (default=4)')
+	parser.add_argument('--client', '-c', metavar='client', required=True, action='append', help='ALSA client to connect to, optional with a port after a colon (e.g. "Hydrogen:Hydrogen Midi-In", "Hydrogen:0", "130:0", "Hydrogen", or "130").')
+	parser.add_argument('--port', '-p', metavar='port', default=0, help='ALSA client port to connect to (e.g. "Hydrogen Midi-In" or "0"). (default=0)')
+	parser.add_argument('--list', '-L', action='store_const', const=True, help='Lists available ALSA clients and ports')
 	args = parser.parse_args()
-	init(args.device, args.tempo, args.measure_length)
+
+	init(args.device, args.client, args.tempo, args.measure_length)
 
 if __name__ == "__main__":
 	parse()
