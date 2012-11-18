@@ -110,57 +110,89 @@ mapping = {
 0: {
 	'start': {'event': 'note', 'param': 100},
 	'stop': {'event': 'note', 'param': 100},
-	'channel': 0
+	'channel': 0,
+	'tickOffset': 1,
 },
 1: {
 	'start': {'event': 'note', 'param': 101},
 	'stop': {'event': 'note', 'param': 101},
-	'channel': 0
+	'channel': 0,
+	'tickOffset': 1,
 },
 2: {
 	'start': {'event': 'note', 'param': 102},
 	'stop': {'event': 'note', 'param': 102},
-	'channel': 0
+	'channel': 0,
+	'tickOffset': 1,
 },
 3: {
 	'start': {'event': 'note', 'param': 103},
 	'stop': {'event': 'note', 'param': 103},
-	'channel': 0
+	'channel': 0,
+	'tickOffset': 1,
 },
 4: {
-	'start': {'event': 'note', 'param': 101},
-	'stop': {'event': 'note', 'param': 101},
-	'channel': 0
+	'start': {'event': 'pc', 'param': 15},
+	'stop': {'event': 'pc', 'param': 15},
+	'channel': 1,
+},
+5: {
+	'start': {'event': 'pc', 'param': 16},
+	'stop': {'event': 'pc', 'param': 16},
+	'channel': 1,
+},
+6: {
+	'start': {'event': 'pc', 'param': 17},
+	'stop': {'event': 'pc', 'param': 17},
+	'channel': 1,
+},
+7: {
+	'start': {'event': 'pc', 'param': 18},
+	'stop': {'event': 'pc', 'param': 18},
+	'channel': 1,
 }}
 
 def beat(tick):
-	if not ((tick + 1) % (2 * measureLength)):
-		# tick before measure start...
-		for i in range(len(tracks)):
-			# get current track
-			itrack = tracks[i]
-			if i in mapping:
-				imap = mapping[i]
-			elif str(i) in mapping:
-				imap = mapping[str(i)]
-			else:
-				# track is not mapped
-				continue
+	# tick before measure start...
+	for i in range(len(tracks)):
+		# get current track
+		itrack = tracks[i]
+		if i in mapping:
+			imap = mapping[i]
+		elif str(i) in mapping:
+			imap = mapping[str(i)]
+		else:
+			# track is not mapped
+			continue
 
+		tickOffset = imap.get('tickOffset', 0)
+		if not ((tick - tickOffset) % (2 * measureLength)):
 			# send MIDI events
 			if itrack.ranges:
 				try:
+					eventType = imap['start'].get('event', 'note')
+					channel = imap.get('channel', 0)
+					startParam = imap['start']['param']
+					stopParam = imap['stop']['param']
+					evt = None
 					if itrack.ranges[0][0] == 0:
 						# ready to fire start event
-						if imap['start']['event'] == 'note':
-							seq.event_write(midi.NoteOnEvent(pitch=imap['start']['param'], channel=imap['channel'], velocity=64), direct=True)
+						if eventType == 'note':
+							evt = midi.NoteOnEvent(pitch=startParam, channel=channel, velocity=64)
+						elif eventType == 'pc':
+							evt = midi.ProgramChangeEvent(data=[startParam], channel=channel)
 					if itrack.ranges[0][1] == 0:
 						# ready to fire stop event
-						if imap['stop']['event'] == 'note':
-							seq.event_write(midi.NoteOnEvent(pitch=imap['stop']['param'], channel=imap['channel'], velocity=64), direct=True)
+						if eventType == 'note':
+							evt = midi.NoteOnEvent(pitch=stopParam, channel=channel, velocity=64)
+						elif eventType == 'pc':
+							evt = midi.ProgramChangeEvent(data=[stopParam], channel=channel)
+					if evt:
+						seq.event_write(evt, direct=True)
 				except KeyError:
 					print 'ERROR: Please check mapping for track #%s: %s' % (i, imap)
 
+	if not (tick % (2 * measureLength)):
 		# advance tracks
 		for itrack in tracks:
 			itrack.advance()
