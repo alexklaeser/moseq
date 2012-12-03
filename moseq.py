@@ -9,11 +9,18 @@ import monome
 from threading import Timer
 import time
 import argparse
+import ConfigParser
+import re
+import logging
 
 class Track(object):
-	def __init__(self, maxPosition = 16):
+	def __init__(self, maxPosition = 16, startEvent = None, stopEvent = None, channel = -1, tickOffset = 0):
 		self.ranges = []
 		self._maxPosition = maxPosition
+		self.startEvent = startEvent
+		self.stopEvent = stopEvent
+		self.channel = channel
+		self.tickOffset = tickOffset
 	
 	def add(self, pos):
 		'''Add a new position that has been pressed and integrate it into
@@ -101,105 +108,61 @@ class Track(object):
 seq = None
 mon = None
 buttons = [[]]
-tracks = []
+tracks = {}
 tempo = 0
 measureLength = 0
 _jackRunning = False
 
-mapping = {
-0: {
-	'start': {'event': 'note', 'param': 100},
-	'stop': {'event': 'note', 'param': 100},
-	'channel': 0,
-	'tickOffset': 1,
-},
-1: {
-	'start': {'event': 'note', 'param': 101},
-	'stop': {'event': 'note', 'param': 101},
-	'channel': 0,
-	'tickOffset': 1,
-},
-2: {
-	'start': {'event': 'note', 'param': 102},
-	'stop': {'event': 'note', 'param': 102},
-	'channel': 0,
-	'tickOffset': 1,
-},
-3: {
-	'start': {'event': 'note', 'param': 103},
-	'stop': {'event': 'note', 'param': 103},
-	'channel': 0,
-	'tickOffset': 1,
-},
-4: {
-	'start': {'event': 'pc', 'param': 15},
-	'stop': {'event': 'pc', 'param': 15},
-	'channel': 1,
-},
-5: {
-	'start': {'event': 'pc', 'param': 16},
-	'stop': {'event': 'pc', 'param': 16},
-	'channel': 1,
-},
-6: {
-	'start': {'event': 'pc', 'param': 17},
-	'stop': {'event': 'pc', 'param': 17},
-	'channel': 1,
-},
-7: {
-	'start': {'event': 'pc', 'param': 18},
-	'stop': {'event': 'pc', 'param': 18},
-	'channel': 1,
-}}
+_regMidiEvent = re.compile(r'(?P<type>note|pc)(?P<param>[0-9]+)')
+def str2midiEvent(s, channel):
+	'''Convert a given MIDI event string to a real MIDI event.'''
+	m = _regMidiEvent.match(s)
+	if not m:
+		return None
+
+	try:
+		# parse the string information
+		param = int(m.group('param'))
+		if m.group('type') == 'note':
+			# return a note on event
+			return midi.NoteOnEvent(pitch=param, channel=channel, velocity=64)
+		elif m.group('type') == 'pc':
+			# return a program change event
+			return midi.ProgramChangeEvent(data=[param], channel=channel)
+		else:
+			return None
+	except ValueError:
+		return None
 
 def beat(tick):
 	# tick before measure start...
-	for i in range(len(tracks)):
-		# get current track
-		itrack = tracks[i]
-		if i in mapping:
-			imap = mapping[i]
-		elif str(i) in mapping:
-			imap = mapping[str(i)]
-		else:
-			# track is not mapped
-			continue
-
-		tickOffset = imap.get('tickOffset', 0)
-		if not ((tick - tickOffset) % (2 * measureLength)):
-			# send MIDI events
+	# send MIDI events
+	logging.debug('tick: %s' % tick)
+	for i, itrack in tracks.iteritems():
+		if not ((tick - itrack.tickOffset) % (2 * measureLength)):
 			if itrack.ranges:
-				try:
-					eventType = imap['start'].get('event', 'note')
-					channel = imap.get('channel', 0)
-					startParam = imap['start']['param']
-					stopParam = imap['stop']['param']
-					evt = None
-					if itrack.ranges[0][0] == 0:
-						# ready to fire start event
-						if eventType == 'note':
-							evt = midi.NoteOnEvent(pitch=startParam, channel=channel, velocity=64)
-						elif eventType == 'pc':
-							evt = midi.ProgramChangeEvent(data=[startParam], channel=channel)
-					if itrack.ranges[0][1] == 0:
-						# ready to fire stop event
-						if eventType == 'note':
-							evt = midi.NoteOnEvent(pitch=stopParam, channel=channel, velocity=64)
-						elif eventType == 'pc':
-							evt = midi.ProgramChangeEvent(data=[stopParam], channel=channel)
-					if evt:
-						seq.event_write(evt, direct=True)
-				except KeyError:
-					print 'ERROR: Please check mapping for track #%s: %s' % (i, imap)
+				# pending events...
+				evt = None
+				if itrack.ranges[0][0] == 0:
+					# ready to fire start event
+					evt = str2midiEvent(itrack.startEvent, itrack.channel)
+				if itrack.ranges[0][1] == 0:
+					# ready to fire stop event
+					evt = str2midiEvent(itrack.stopEvent, itrack.channel)
+				
+				# send event directly if applicable
+				if evt:
+					logging.debug('sending event: %s' % evt)
+					seq.event_write(evt, direct=True)
 
 	if not (tick % (2 * measureLength)):
 		# advance tracks
-		for itrack in tracks:
+		for i, itrack in tracks.iteritems():
 			itrack.advance()
 
 	if not (tick % 2):
 		# show LEDs
-		for i in range(len(tracks)):
+		for i, itrack in tracks.iteritems():
 			mask = tracks[i].mask
 			mon.led_row(0, i, mask)
 	else:
@@ -250,11 +213,17 @@ def loop():
 	waitTime = (tickCount + 1) * interval - transportTime
 	Timer(waitTime, loop).start()
 
-def init(device, alsaClients, _tempo, _measureLength):
+def init(ini, device, alsaClients, _tempo, _measureLength, debugLevel):
 	'''Initiate all variables an devices/classes.'''
 	global seq, mon, buttons, tracks, tempo, measureLength
 	tempo = _tempo
 	measureLength = _measureLength
+
+	# init logging
+	numeric_level = getattr(logging, debugLevel.upper(), None)
+	if not isinstance(numeric_level, int):
+		raise ValueError('Invalid log level: %s' % loglevel)
+	logging.basicConfig(level=numeric_level)
 
 	# initiate MIDI sequencer
 	seq = midi.sequencer.SequencerWrite(alsa_sequencer_name='moseq', alsa_port_name='moseq in', alsa_queue_name='moseq queue')
@@ -290,10 +259,32 @@ def init(device, alsaClients, _tempo, _measureLength):
 	# init connection to jack
 	jack.attach('moseq')
 
-	# init tracks
-	tracks = [Track(mon.columns) for i in range(mon.rows)]
+	# read in config file and init tracks
+	parser = ConfigParser.SafeConfigParser()
+	parser.read(ini)
+	regSection = re.compile(r'track(?P<track>[0-9]+)')
+	for isec in parser.sections():
+		m = regSection.match(isec)
+		if not m:
+			# no track configuration section... ignore
+			continue
 
+		try:
+			# get track number
+			i = int(m.group('track'))
+
+			# init a new Track
+			vals = dict(parser.items(isec))
+			tracks[i] = Track(mon.columns,
+					startEvent=vals.get('start'),
+					stopEvent=vals.get('stop'),
+					channel=int(vals.get('channel', -1)),
+					tickOffset=vals.get('tickOffset', 0))
+		except ValueError:
+			continue
+		
 	# start main loop
+	print 'Starting main loop...'
 	loop()
 
 def parse():
@@ -303,15 +294,17 @@ def parse():
 		sys.exit(0)
 
 	parser = argparse.ArgumentParser(description='A live midi sequencer using the monome.')
+	parser.add_argument('--ini-file', '-i', metavar='ini', required=True, help='Path to a configuration .ini file.')
 	parser.add_argument('--device', '-d', metavar='dev', required=True, help='Path to the USB devices corresponding to your monome (e.g. /dev/ttyUSB0)')
 	parser.add_argument('--tempo', '-t', metavar='bpm', default=120, type=int, help='Tempo for the session (in bpm). (default=120)')
 	parser.add_argument('--measure-length', '-l', metavar='length', default=4, type=int, help='Length of each measure (in quarter notes). (default=4)')
 	parser.add_argument('--client', '-c', metavar='client', required=True, action='append', help='ALSA client to connect to, optional with a port after a colon (e.g. "Hydrogen:Hydrogen Midi-In", "Hydrogen:0", "130:0", "Hydrogen", or "130").')
 	parser.add_argument('--port', '-p', metavar='port', default=0, help='ALSA client port to connect to (e.g. "Hydrogen Midi-In" or "0"). (default=0)')
 	parser.add_argument('--list', '-L', action='store_const', const=True, help='Lists available ALSA clients and ports')
+	parser.add_argument('--debug', '-D', metavar='level', choices=set(('info', 'debug', 'warn', 'critical', 'error')), default='critical', help='define the debug level: info, debug, warn, critical, error')
 	args = parser.parse_args()
 
-	init(args.device, args.client, args.tempo, args.measure_length)
+	init(args.ini_file, args.device, args.client, args.tempo, args.measure_length, args.debug)
 
 if __name__ == "__main__":
 	parse()
