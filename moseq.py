@@ -199,7 +199,7 @@ def loop():
 			print 'jack transport has been stopped... waiting for jack to be restarted'
 			_jackRunning = False
 			mon.led_all(0)
-			for itrack in tracks:
+			for i, itrack in tracks.iteritems():
 				itrack.clear()
 		Timer(0.1, loop).start()
 		return
