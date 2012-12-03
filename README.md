@@ -43,3 +43,6 @@ Features
 * tracks can be pre-arranged on the fly, MIDI events are triggered to start and stop loops
 * tempo can be specified via a command line option
 
+About Me
+--------
+You can check out my personal webpage at: http://alexklaeser.de
