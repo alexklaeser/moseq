@@ -40,16 +40,6 @@ even support Linux as platform.
 Features
 --------
 * synchronization to Jack, listen to start/stop events of Jack
-* tracks can be pre-arranged on the fly
+* tracks can be pre-arranged on the fly, MIDI events are triggered to start and stop loops
 * tempo can be specified via a command line option
-
-Todos
------
-Of course, there are more features that would be nice to have.
-Here is my current wish list:
-* configure MIDI mappings etc. via a .ini file
-* multi-row tracks
-* multi-page views
-* read events sent via a MIDI foot controller (or any another MIDI device)
-* provide all necessary software bundles as Debian packages
 
