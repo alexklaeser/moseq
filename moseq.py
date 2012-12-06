@@ -26,6 +26,7 @@ class Track(object):
 		'''Add a new position that has been pressed and integrate it into
 		the existing ranges.'''
 		inRange = False
+		pos = max(1, pos)
 		for irange in self.ranges:
 			inRange = True
 
@@ -46,6 +47,9 @@ class Track(object):
 			else:
 				# position could not be matched
 				inRange = False
+
+			# break loop if we could match the position to a range
+			if inRange: break
 
 		if not inRange:
 			# position could not be matched -> add a new range
@@ -135,7 +139,11 @@ def str2midiEvent(s, channel):
 		return None
 
 def beat(tick):
-	# tick before measure start...
+	if not (tick % (2 * measureLength)):
+		# advance tracks
+		for i, itrack in tracks.iteritems():
+			itrack.advance()
+
 	# send MIDI events
 	logging.debug('tick: %s' % tick)
 	for i, itrack in tracks.iteritems():
@@ -152,13 +160,8 @@ def beat(tick):
 				
 				# send event directly if applicable
 				if evt:
-					logging.debug('sending event: %s' % evt)
+					logging.info('sending event: %s' % evt)
 					seq.event_write(evt, direct=True)
-
-	if not (tick % (2 * measureLength)):
-		# advance tracks
-		for i, itrack in tracks.iteritems():
-			itrack.advance()
 
 	if not (tick % 2):
 		# show LEDs
@@ -177,8 +180,8 @@ def readEvents(tick):
 		if not e.pressed: continue  # ignore button-up events
 
 		# add pressed position to the corresponding track
-		track = tracks[e.y]
-		track.add(e.x)
+		if e.y in tracks:
+			tracks[e.y].add(e.x)
 
 def loop():
 	'''Main loop function, calls processing sub-functions.'''
@@ -223,7 +226,9 @@ def init(ini, device, alsaClients, _tempo, _measureLength, debugLevel):
 	numeric_level = getattr(logging, debugLevel.upper(), None)
 	if not isinstance(numeric_level, int):
 		raise ValueError('Invalid log level: %s' % loglevel)
-	logging.basicConfig(level=numeric_level)
+	logging.basicConfig(
+			level=numeric_level,
+			format='[%(levelname)s] %(asctime)s - %(message)s')
 
 	# initiate MIDI sequencer
 	seq = midi.sequencer.SequencerWrite(alsa_sequencer_name='moseq', alsa_port_name='moseq in', alsa_queue_name='moseq queue')
